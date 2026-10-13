@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 
 const browser = await chromium.launch({
@@ -7,7 +8,7 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--no-proxy-server', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });
-const screenshotDirectory = new URL('../../ui/login/crimson-hour/screenshots/', import.meta.url).pathname;
+const screenshotDirectory = fileURLToPath(new URL('../../ui/login/crimson-hour/screenshots/', import.meta.url));
 await mkdir(screenshotDirectory, { recursive: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
 const errors = [];

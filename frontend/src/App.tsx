@@ -1,6 +1,18 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowRight, ArrowUpRight, Check, ChevronRight, Eye, EyeOff, Fingerprint, KeyRound, LoaderCircle, LockKeyhole, Mail, Pause, Play, ShieldCheck, Sparkles, UserRound, X } from 'lucide-react';
+import { ArrowDown, Check } from 'lucide-react';
 import { signIn, type CampusSession } from './api';
+import {
+  ChakraSpinner,
+  HankoBloodSeal,
+  KunaiIcon,
+  MakimonoScrollIcon,
+  ScrollBorders,
+  ScrollRod,
+  SealingTag,
+  SharinganEye,
+  ShinobiHeadband,
+  ShurikenIcon,
+} from './NinjaArtifacts';
 
 const Atmosphere = lazy(() => import('./Atmosphere'));
 
@@ -82,69 +94,174 @@ export default function App() {
 
   return <main ref={pageRef} className={`login-page ${motion ? 'motion-on' : 'motion-off'}`}>
     <div className="ambient-wash" aria-hidden="true" />
+    <div className="scene" aria-hidden="true">
+      <div className="moon-halo" />
+      <picture className="art-depth"><source media="(max-width: 740px)" srcSet="/assets/crimson-hour-mobile.webp" /><img className="scene-art" src="/assets/crimson-hour.webp" alt="" fetchPriority="high" /></picture>
+      <div className="scene-vignette" />
+      <img className="foreground-leaves" src="/assets/maple-foreground.webp" alt="" />
+      <div className="scene-grain" />
+      <Suspense fallback={null}><Atmosphere active={motion} /></Suspense>
+      <span className="scene-coordinate">35° 41′ N &nbsp; / &nbsp; THE NEXT CHAPTER</span>
+      <div className="floating-seal"><span>暁</span><small>AKATSUKI</small></div>
+    </div>
     <header className="site-header">
       <a className="brand" href="/" aria-label="Akatsuki home"><Cloud /><span>AKATSUKI<small>THE CAMPUS COLLECTIVE</small></span></a>
-      <nav aria-label="Page navigation"><button className="about-link" onClick={() => setDialog('about')}>A different kind of network <ArrowUpRight size={14} /></button><span className="nav-divider" /><button className="motion-control" aria-label={motion ? 'Pause ambient animation' : 'Play ambient animation'} aria-pressed={motion} onClick={() => setMotion(!motion)}>{motion ? <Pause size={13} /> : <Play size={13} />}<span>{motion ? 'Motion on' : 'Motion off'}</span></button></nav>
+      <nav aria-label="Page navigation">
+        <button className="about-link" onClick={() => setDialog('about')}>
+          <MakimonoScrollIcon size={14} />
+          <span>A different kind of network</span>
+        </button>
+        <span className="nav-divider" />
+        <button className="motion-control" aria-label={motion ? 'Pause ambient animation' : 'Play ambient animation'} aria-pressed={motion} onClick={() => setMotion(!motion)}>
+          <ShurikenIcon size={14} className={motion ? 'shuriken-spinning' : ''} />
+          <span>{motion ? 'Motion on' : 'Motion off'}</span>
+        </button>
+      </nav>
     </header>
 
     <div className="experience-grid">
       <section className="story" aria-labelledby="story-heading">
-        <div className="scene" aria-hidden="true">
-          <div className="moon-halo" />
-          <picture className="art-depth"><source media="(max-width: 740px)" srcSet="/assets/crimson-hour-mobile.webp" /><img className="scene-art" src="/assets/crimson-hour.webp" alt="" fetchPriority="high" /></picture>
-          <div className="scene-vignette" />
-          <img className="foreground-leaves" src="/assets/maple-foreground.webp" alt="" />
-          <div className="scene-grain" />
-          <Suspense fallback={null}><Atmosphere active={motion} /></Suspense>
-          <span className="scene-coordinate">35° 41′ N &nbsp; / &nbsp; THE NEXT CHAPTER</span>
-          <div className="floating-seal"><span>暁</span><small>AKATSUKI</small></div>
-        </div>
         <div className="story-copy">
-          <div className="eyebrow"><span /> DIFFERENT PATHS. ONE COLLECTIVE.</div>
+          <div className="eyebrow"><HankoBloodSeal size={18} /> DIFFERENT PATHS. ONE COLLECTIVE.</div>
           <h1 id="story-heading">Find your people.<br /><span>Leave your mark.</span></h1>
           <p>Big ideas need the right people.<br className="desktop-break" /> Find yours, right here on campus.</p>
-          <div className="story-tags"><span>Find opportunities</span><i /><span>Build your team</span><i /><span>Go further</span></div>
+          <div className="story-tags">
+            <span className="ninja-chip"><MakimonoScrollIcon size={12} /> Find opportunities</span>
+            <i />
+            <span className="ninja-chip"><KunaiIcon size={12} /> Build your team</span>
+            <i />
+            <span className="ninja-chip"><ShurikenIcon size={12} /> Go further</span>
+          </div>
         </div>
-        <div className="chapter-marker" aria-hidden="true"><span>01 <i>/</i> YOUR BEGINNING</span><div /><ArrowDown size={13} /></div>
+        <div className="chapter-marker" aria-hidden="true">
+          <span>巻の一 <i>/</i> YOUR BEGINNING</span>
+          <div />
+          <ArrowDown size={13} />
+        </div>
       </section>
 
       <section className="entry" aria-label="Campus sign in">
         <div className="entry-glow" aria-hidden="true" />
-        <div className="login-card">
-          <div className="card-topline"><span className="card-symbol"><Cloud /></span><span>YOUR NEXT CHAPTER</span><span className="topline-dash" /></div>
-          {session ? <div className="success-panel" aria-live="polite">
-            <div className="success-symbol"><Check size={28} /></div>
-            <div className="eyebrow">YOU BELONG HERE</div>
-            <h2>You’re in,<br /><span>{session.user.name.split(' ')[0]}.</span></h2>
-            <p>Your campus identity is confirmed. Your next chapter is ready to begin.</p>
-            <div className="identity-summary"><UserRound size={20} /><div><strong>{session.user.name}</strong><span>{session.user.department}</span><small>{session.user.roll_number}</small></div>{session.user.erp_verified && <ShieldCheck size={18} aria-label="ERP verified" />}</div>
-            <p className="success-note">The campus workspace is coming next. You’re successfully signed in for this session.</p>
-            <button className="submit-button" onClick={() => { setSession(null); setError(''); }}>Back to sign in <ArrowRight size={18} /></button>
-          </div> : <>
-            <div className="form-intro"><h2>A place to<br /><span>belong. And begin.</span></h2><p>Your campus. Your people. Your possibilities.</p></div>
-            <div className="erp-label"><ShieldCheck size={15} /><span>SIGN IN WITH YOUR COLLEGE ERP</span><span className="label-line" /></div>
-            <form onSubmit={submit} ref={formRef}>
-              <div className="field"><label htmlFor="username">ERP username</label><div className="input-shell"><UserRound size={17} /><input id="username" name="username" type="text" autoComplete="username" placeholder="Your college ERP username" value={username} onChange={event => setUsername(event.target.value)} required maxLength={254} disabled={pending} spellCheck={false} autoCapitalize="none" /></div></div>
-              <div className="field"><div className="label-row"><label htmlFor="password">Password</label><button type="button" className="forgot-link" onClick={() => setDialog('help')}>Need a hand?</button></div><div className="input-shell"><KeyRound size={17} /><input id="password" name="password" type={visible ? 'text' : 'password'} autoComplete="current-password" placeholder="Your ERP password" value={password} onChange={event => setPassword(event.target.value)} required maxLength={1024} disabled={pending} /><button className="password-toggle" type="button" onClick={() => setVisible(!visible)} aria-label={visible ? 'Hide password' : 'Show password'} aria-pressed={visible}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></div>
-              {error && <div className="form-error" role="alert" ref={errorRef} tabIndex={-1}>{error}</div>}
-              <button className="submit-button" type="submit" disabled={pending}>{pending ? <><LoaderCircle className="spinner" size={18} /> Connecting to your campus…</> : <>Enter the collective <ArrowRight size={18} /></>}</button>
-              <div className="form-reassurance"><LockKeyhole size={12} /><span>Your ERP account confirms your campus identity.</span></div>
-            </form>
-            <div className="card-footer"><div className="footer-icon"><Fingerprint size={21} /></div><p>New here? <span>You’re already one of us.</span><small>Your first ERP sign-in creates your Akatsuki profile.</small></p></div>
-          </>}
-          <div className="card-corner corner-tl" aria-hidden="true" /><div className="card-corner corner-br" aria-hidden="true" />
+        <div className="makimono-scroll-wrapper">
+          <ScrollRod position="top" />
+          <div className="login-card">
+            <ScrollBorders />
+            <div className="card-topline">
+              <span className="card-symbol"><HankoBloodSeal size={22} /></span>
+              <span>YOUR NEXT CHAPTER</span>
+              <span className="topline-dash" />
+              <SealingTag text="極秘" />
+            </div>
+            {session ? <div className="success-panel" aria-live="polite">
+              <div className="success-symbol"><HankoBloodSeal size={42} /></div>
+              <div className="eyebrow">YOU BELONG HERE</div>
+              <h2>You’re in,<br /><span>{session.user.name.split(' ')[0]}.</span></h2>
+              <p>Your campus identity is confirmed under the blood seal. Your next chapter is ready to begin.</p>
+              <div className="identity-summary">
+                <ShinobiHeadband size={22} />
+                <div>
+                  <strong>{session.user.name}</strong>
+                  <span>{session.user.department}</span>
+                  <small>{session.user.roll_number}</small>
+                </div>
+                {session.user.erp_verified && <SealingTag text="認可" />}
+              </div>
+              <p className="success-note">The campus workspace is coming next. You’re successfully signed in for this session.</p>
+              <button className="submit-button sealing-talisman-btn" onClick={() => { setSession(null); setError(''); }}>
+                <KunaiIcon size={16} /> Back to sign in <ShurikenIcon size={16} />
+              </button>
+            </div> : <>
+              <div className="form-intro">
+                <h2>A place to<br /><span>belong. And begin.</span></h2>
+                <p>Your campus. Your people. Your possibilities.</p>
+              </div>
+              <div className="erp-label">
+                <ShinobiHeadband size={15} />
+                <span>SIGN IN WITH YOUR COLLEGE ERP</span>
+                <span className="label-line" />
+              </div>
+              <form onSubmit={submit} ref={formRef}>
+                <div className="field">
+                  <label htmlFor="username">ERP username</label>
+                  <div className="input-shell">
+                    <ShinobiHeadband size={17} />
+                    <input id="username" name="username" type="text" autoComplete="username" placeholder="Your college ERP username" value={username} onChange={event => setUsername(event.target.value)} required maxLength={254} disabled={pending} spellCheck={false} autoCapitalize="none" />
+                  </div>
+                </div>
+                <div className="field">
+                  <div className="label-row">
+                    <label htmlFor="password">Password</label>
+                    <button type="button" className="forgot-link" onClick={() => setDialog('help')}>
+                      <MakimonoScrollIcon size={12} /> Need a hand?
+                    </button>
+                  </div>
+                  <div className="input-shell">
+                    <KunaiIcon size={17} />
+                    <input id="password" name="password" type={visible ? 'text' : 'password'} autoComplete="current-password" placeholder="Your ERP password" value={password} onChange={event => setPassword(event.target.value)} required maxLength={1024} disabled={pending} />
+                    <button className="password-toggle" type="button" onClick={() => setVisible(!visible)} aria-label={visible ? 'Hide password' : 'Show password'} aria-pressed={visible}>
+                      <SharinganEye active={visible} size={18} />
+                    </button>
+                  </div>
+                </div>
+                {error && <div className="form-error" role="alert" ref={errorRef} tabIndex={-1}>
+                  <SealingTag text="警告" />
+                  <span>{error}</span>
+                </div>}
+                <button className="submit-button sealing-talisman-btn" type="submit" disabled={pending}>
+                  {pending ? (
+                    <><ChakraSpinner size={18} /> Connecting to your campus…</>
+                  ) : (
+                    <><ShurikenIcon size={16} /> Enter the collective <KunaiIcon size={16} className="btn-kunai" /></>
+                  )}
+                </button>
+                <div className="form-reassurance">
+                  <KunaiIcon size={12} />
+                  <span>Your ERP account confirms your campus identity.</span>
+                </div>
+              </form>
+              <div className="card-footer">
+                <div className="footer-icon"><HankoBloodSeal size={24} /></div>
+                <p>New here? <span>You’re already one of us.</span><small>Your first ERP sign-in creates your Akatsuki profile.</small></p>
+              </div>
+            </>}
+            <div className="card-corner corner-tl" aria-hidden="true" /><div className="card-corner corner-br" aria-hidden="true" />
+          </div>
+          <ScrollRod position="bottom" />
         </div>
-        <div className="below-card"><Sparkles size={13} /><span>Built for the people who want to build something.</span></div>
+        <div className="below-card"><KunaiIcon size={13} /><span>Built for the people who want to build something.</span></div>
       </section>
     </div>
 
-    <footer className="site-footer"><span>© {new Date().getFullYear()} Akatsuki <i /> Made of ambition. Built for campus.</span><button onClick={() => setDialog('about')}>Independent student project <ArrowUpRight size={12} /></button></footer>
+    <footer className="site-footer">
+      <span>© {new Date().getFullYear()} Akatsuki <i /> Made of ambition. Built for campus.</span>
+      <button onClick={() => setDialog('about')}><MakimonoScrollIcon size={12} /> Independent student project</button>
+    </footer>
+
     <dialog ref={dialogRef} onCancel={() => setDialog(null)} onClick={event => { if (event.target === event.currentTarget) setDialog(null); }} aria-labelledby="dialog-heading">
-      <button className="dialog-close" onClick={() => setDialog(null)} aria-label="Close dialog"><X size={20} /></button>
+      <ScrollRod position="top" />
+      <button className="dialog-close" onClick={() => setDialog(null)} aria-label="Close dialog"><ShurikenIcon size={18} /></button>
       <Cloud className="dialog-cloud" />
-      <div className="eyebrow">THE CAMPUS COLLECTIVE</div>
+      <div className="eyebrow"><HankoBloodSeal size={16} /> THE CAMPUS COLLECTIVE</div>
       <h2 id="dialog-heading">{dialog === 'help' ? 'Let’s get you in.' : 'Different paths. Shared ambition.'}</h2>
-      {dialog === 'help' ? <><p>Use the same username and password you use on your college ERP. Akatsuki doesn’t manage your ERP password.</p><p>If you’ve forgotten your details, visit the college ERP portal or contact your campus administrator.</p><a className="submit-button" href="https://erp.mit.asia" target="_blank" rel="noreferrer">Open the college ERP <ArrowUpRight size={17} /></a></> : <><p>Akatsuki connects students with campus opportunities, project teammates, and the people behind the work. Find a role, share an idea, or start something together.</p><div className="dialog-features"><span><Sparkles size={16} /> Opportunities across campus</span><span><Mail size={16} /> Conversations with context</span><span><ShieldCheck size={16} /> College ERP sign-in</span></div><p className="dialog-disclaimer">Akatsuki is an independent student project, separate from the official college ERP portal. Campus sign-in confirms identity, not college endorsement of individual opportunities.</p><button className="submit-button" onClick={() => setDialog(null)}>Find my people <ChevronRight size={18} /></button></>}
+      {dialog === 'help' ? <>
+        <p>Use the same username and password you use on your college ERP. Akatsuki doesn’t manage your ERP password.</p>
+        <p>If you’ve forgotten your details, visit the college ERP portal or contact your campus administrator.</p>
+        <a className="submit-button sealing-talisman-btn" href="https://erp.mit.asia" target="_blank" rel="noreferrer">
+          <MakimonoScrollIcon size={16} /> Open the college ERP <KunaiIcon size={16} />
+        </a>
+      </> : <>
+        <p>Akatsuki connects students with campus opportunities, project teammates, and the people behind the work. Find a role, share an idea, or start something together.</p>
+        <div className="dialog-features">
+          <span><MakimonoScrollIcon size={16} /> Opportunities across campus</span>
+          <span><KunaiIcon size={16} /> Conversations with context</span>
+          <span><ShinobiHeadband size={16} /> College ERP sign-in</span>
+        </div>
+        <p className="dialog-disclaimer">Akatsuki is an independent student project, separate from the official college ERP portal. Campus sign-in confirms identity, not college endorsement of individual opportunities.</p>
+        <button className="submit-button sealing-talisman-btn" onClick={() => setDialog(null)}>
+          <ShurikenIcon size={16} /> Find my people <KunaiIcon size={16} />
+        </button>
+      </>}
+      <ScrollRod position="bottom" />
     </dialog>
   </main>;
 }

@@ -77,19 +77,19 @@ export default function Atmosphere({ active }: { active: boolean }) {
     petal.bezierCurveTo(.14, .07, .07, -.06, 0, -.16);
     const petalGeometry = new THREE.ShapeGeometry(petal, 8);
     const petalMaterial = new THREE.MeshStandardMaterial({ color: 0xb71839, emissive: 0x510916, emissiveIntensity: .3, roughness: .6, metalness: .2, side: THREE.DoubleSide, transparent: true, opacity: .76 });
-    const petals = Array.from({ length: 18 }, (_, i) => {
+    const petals = Array.from({ length: 30 }, (_, i) => {
       const mesh = new THREE.Mesh(petalGeometry, petalMaterial);
       const seed = Math.sin(i * 84.3 + 7) * 1000;
       const random = seed - Math.floor(seed);
-      mesh.position.set((random - .5) * 7, ((i * .71) % 6) - 3, (random - .5) * 4);
+      mesh.position.set((random - .5) * 14, ((i * .71) % 6) - 3, (random - .5) * 4);
       mesh.scale.setScalar(.23 + random * .65);
       mesh.rotation.set(i, i * .4, i * .8);
       scene.add(mesh);
       return { mesh, speed: .09 + random * .12, phase: i * 1.7 };
     });
     const pointsGeometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(90 * 3);
-    for (let i = 0; i < positions.length; i++) positions[i] = Math.sin(i * 15.713) * (i % 3 === 2 ? 2 : 4);
+    const positions = new Float32Array(140 * 3);
+    for (let i = 0; i < positions.length; i++) positions[i] = Math.sin(i * 15.713) * (i % 3 === 2 ? 3 : 7);
     pointsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     const sparks = new THREE.Points(pointsGeometry, new THREE.PointsMaterial({ color: 0xf3788a, size: .017, transparent: true, opacity: .5, blending: THREE.AdditiveBlending, depthWrite: false }));
     scene.add(sparks);
@@ -128,8 +128,8 @@ export default function Atmosphere({ active }: { active: boolean }) {
       compact = width < 600;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
-      emblem.position.x = Math.min(1.55, camera.aspect * 1.8);
-      emblem.position.y = compact ? .9 : -.48;
+      emblem.position.x = compact ? 0 : Math.min(0.65, camera.aspect * 0.45);
+      emblem.position.y = compact ? .85 : -.42;
       emblem.scale.setScalar(compact ? .42 : .65);
       if (!active) renderer.render(scene, camera);
     };
