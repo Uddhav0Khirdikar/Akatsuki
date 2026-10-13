@@ -1,5 +1,6 @@
+use crate::utils::validation::{self, Pagination};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -25,11 +26,12 @@ pub async fn get_or_create_conversation_for_job(
     auth: AuthUser,
     Path(job_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&job_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id == auth.id {
@@ -40,13 +42,13 @@ pub async fn get_or_create_conversation_for_job(
     }
 
     let existing = sqlx::query_as::<_, Conversation>(
-        "SELECT * FROM conversations WHERE job_id = ? AND student_id = ?"
+        "SELECT * FROM conversations WHERE job_id = ? AND student_id = ?",
     )
     .bind(&job_id)
     .bind(&auth.id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     if let Some(conv) = existing {
         return Ok(Json(conv));
@@ -74,16 +76,17 @@ pub async fn get_or_create_conversation_for_job(
     .bind(&job.creator_id)
     .bind(&now)
     .bind(&now)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     let created = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = ?")
         .bind(&conv_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok(Json(created))
 }
 
@@ -91,13 +94,15 @@ pub async fn get_or_create_conversation_for_job(
 pub async fn get_job_conversations(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
     Path(job_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&job_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id != auth.id {
@@ -114,21 +119,24 @@ pub async fn get_job_conversations(
             c.student_id, u.name AS student_name,
             u.roll_number AS student_roll_number,
             u.department AS student_department,
-            (SELECT m.content FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message,
-            (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message_time,
+            (SELECT m.content FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_message,
+            (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_message_time,
             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != ? AND m.is_read = 0) AS unread_count,
             c.updated_at
         FROM conversations c
         JOIN users u ON c.student_id = u.id
         WHERE c.job_id = ?
-        ORDER BY c.updated_at DESC
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&auth.id)
     .bind(&job_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(dms))
 }
@@ -136,15 +144,17 @@ pub async fn get_job_conversations(
 pub async fn get_user_conversations(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
     let conversations = sqlx::query_as::<_, ConversationSummaryDto>(
         r#"
         SELECT 
             c.id, c.job_id, j.title AS job_title,
             c.student_id, us.name AS student_name,
             c.owner_id, uo.name AS owner_name,
-            (SELECT m.content FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message,
-            (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message_time,
+            (SELECT m.content FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_message,
+            (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_message_time,
             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != ? AND m.is_read = 0) AS unread_count,
             c.updated_at
         FROM conversations c
@@ -152,15 +162,18 @@ pub async fn get_user_conversations(
         JOIN users us ON c.student_id = us.id
         JOIN users uo ON c.owner_id = uo.id
         WHERE c.student_id = ? OR c.owner_id = ?
-        ORDER BY c.updated_at DESC
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&auth.id)
     .bind(&auth.id)
     .bind(&auth.id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(conversations))
 }
@@ -168,13 +181,16 @@ pub async fn get_user_conversations(
 pub async fn get_conversation_messages(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
     Path(conv_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = ?")
         .bind(&conv_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
 
     if conv.student_id != auth.id && conv.owner_id != auth.id {
@@ -184,16 +200,7 @@ pub async fn get_conversation_messages(
         ));
     }
 
-    // Mark unread messages sent to the current user as read
-    let _ = sqlx::query(
-        "UPDATE messages SET is_read = 1 WHERE conversation_id = ? AND sender_id != ?"
-    )
-    .bind(&conv_id)
-    .bind(&auth.id)
-    .execute(&state.db)
-    .await;
-
-    let messages = sqlx::query_as::<_, MessageWithSenderDto>(
+    let mut messages = sqlx::query_as::<_, MessageWithSenderDto>(
         r#"
         SELECT 
             m.id, m.conversation_id, m.sender_id,
@@ -202,14 +209,29 @@ pub async fn get_conversation_messages(
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE m.conversation_id = ?
-        ORDER BY m.created_at ASC
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&conv_id)
-    .fetch_all(&state.db)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
+    // Acknowledge only the delivered page, never unseen or concurrently arriving messages.
+    for message in &mut messages {
+        if message.sender_id != auth.id && message.is_read == 0 {
+            sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+                .bind(&message.id)
+                .execute(&mut *transaction)
+                .await?;
+            message.is_read = 1;
+        }
+    }
+    transaction.commit().await?;
+    messages.reverse();
     Ok(Json(messages))
 }
 
@@ -227,11 +249,13 @@ pub async fn send_message(
         ));
     }
 
+    validation::text(content, "Message", 4000)?;
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = ?")
         .bind(&conv_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
 
     if conv.student_id != auth.id && conv.owner_id != auth.id {
@@ -255,17 +279,18 @@ pub async fn send_message(
     .bind(&auth.id)
     .bind(content)
     .bind(&now)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
         .bind(&now)
         .bind(&conv_id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     let message_dto = MessageWithSenderDto {
         id: msg_id,
         conversation_id: conv_id.clone(),
@@ -285,7 +310,10 @@ pub async fn send_message(
     })
     .to_string();
 
-    let _ = state.tx.send(broadcast_payload);
+    let _ = state.tx.send(crate::handlers::ws::RealtimeEvent {
+        recipients: [conv.student_id, conv.owner_id],
+        payload: broadcast_payload,
+    });
 
     Ok((StatusCode::CREATED, Json(message_dto)))
 }

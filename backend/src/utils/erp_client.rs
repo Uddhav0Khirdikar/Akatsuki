@@ -1,23 +1,45 @@
-use reqwest::{Client, StatusCode as ReqwestStatus};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tracing::{error, info, warn};
+use crate::middleware::auth::AppError;
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct ErpStudentProfile {
     pub roll_no: String,
     pub full_name: String,
     pub course_name: String,
-    pub mobile_no: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
+pub enum ErpError {
+    Credentials,
+    Unavailable,
+    Profile,
+}
+impl ErpError {
+    pub fn into_app_error(self) -> AppError {
+        match self {
+            Self::Credentials => AppError(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid ERP credentials".into(),
+            ),
+            Self::Unavailable => AppError(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "College ERP is unavailable; retry later".into(),
+            ),
+            Self::Profile => AppError(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "College ERP returned an invalid student profile".into(),
+            ),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct DashboardResponse {
     #[serde(rename = "profileDetails")]
     profile_details: Option<ProfileDetailsRaw>,
 }
-
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ProfileDetailsRaw {
     #[serde(rename = "rollNo")]
     roll_no: Option<String>,
@@ -25,146 +47,120 @@ struct ProfileDetailsRaw {
     first_name: Option<String>,
     #[serde(rename = "courseName")]
     course_name: Option<String>,
-    #[serde(rename = "mobileNo")]
-    mobile_no: Option<String>,
 }
 
 pub struct ErpClient {
     base_url: String,
 }
-
 impl ErpClient {
-    pub fn new(base_url: Option<String>) -> Self {
-        let base_url = base_url.unwrap_or_else(|| "https://erp.mit.asia".to_string());
-        ErpClient { base_url }
+    pub fn new(base_url: String) -> Self {
+        Self { base_url }
     }
 
-    /// Authenticates with the ERP portal and retrieves official student profile information.
-    /// Follows the exact protocol used in MIT_Attendance (Spring Security j_spring_security_check + Dashboard API)
     pub async fn login_and_fetch_profile(
         &self,
-        username_or_email: &str,
+        username: &str,
         password: &str,
-    ) -> Result<ErpStudentProfile, String> {
-        let username_trimmed = username_or_email.trim();
-
-        // 1. Check for mock/demo mode credentials for offline development and testing
-        if password == "college123" || password == "demo123" {
-            info!("ERP: Demo/Mock credentials supplied for {}", username_trimmed);
-            return Ok(ErpStudentProfile {
-                roll_no: if username_trimmed.contains('@') {
-                    username_trimmed.split('@').next().unwrap().to_uppercase()
-                } else {
-                    username_trimmed.to_uppercase()
-                },
-                full_name: "Verified MIT Student".to_string(),
-                course_name: "B.Tech Computer Science and Engineering".to_string(),
-                mobile_no: Some("9876543210".to_string()),
-            });
-        }
-
-        // 2. Build HTTP client with cookie store enabled
+    ) -> Result<ErpStudentProfile, ErpError> {
+        // Each login gets its own cookie jar, preventing ERP sessions from crossing users.
         let client = Client::builder()
             .cookie_store(true)
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none()) // Handle redirect manually to preserve Spring session
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| format!("Failed to initialize HTTP client: {}", e))?;
-
-        // 3. Step 1: POST to /j_spring_security_check
+            .map_err(|_| ErpError::Unavailable)?;
         let login_url = format!("{}/j_spring_security_check", self.base_url);
-        let mut form_params = HashMap::new();
-        form_params.insert("j_username", username_trimmed);
-        form_params.insert("j_password", password);
-
-        let login_res = client
+        let response = client
             .post(&login_url)
             .header("Origin", &self.base_url)
             .header("Referer", format!("{}/login.htm", self.base_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-            .form(&form_params)
+            .form(&[("j_username", username.trim()), ("j_password", password)])
             .send()
             .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    "ERP server connection timed out".to_string()
-                } else {
-                    format!("Failed to reach ERP server: {}", e)
+            .map_err(|_| ErpError::Unavailable)?;
+        match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(ErpError::Credentials),
+            status if status.is_server_error() => return Err(ErpError::Unavailable),
+            status if status.is_redirection() => {
+                let base = reqwest::Url::parse(&self.base_url).map_err(|_| ErpError::Profile)?;
+                let redirect = response
+                    .headers()
+                    .get("Location")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|location| base.join(location).ok())
+                    .ok_or(ErpError::Profile)?;
+                // Do not follow ERP redirects to arbitrary hosts or downgrade HTTPS.
+                if redirect.origin() != base.origin() {
+                    return Err(ErpError::Profile);
                 }
-            })?;
-
-        let status = login_res.status();
-
-        if status.as_u16() == 521 {
-            return Err("College ERP server is currently offline (Error 521)".to_string());
-        }
-
-        // 4. Handle 302 redirect from Spring Security
-        if status == ReqwestStatus::FOUND || status == ReqwestStatus::MOVED_PERMANENTLY {
-            if let Some(location) = login_res.headers().get("Location").and_then(|h| h.to_str().ok()) {
-                let redirect_url = if location.starts_with("http") {
-                    location.to_string()
-                } else {
-                    format!("{}{}", self.base_url, location)
-                };
-
-                // Follow redirect with session cookies
-                let _ = client
-                    .get(&redirect_url)
-                    .header("User-Agent", "Mozilla/5.0")
-                    .header("Referer", &login_url)
+                if redirect.as_str().contains("login") {
+                    return Err(ErpError::Credentials);
+                }
+                let result = client
+                    .get(redirect)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|_| ErpError::Unavailable)?;
+                if result.status().is_server_error() {
+                    return Err(ErpError::Unavailable);
+                }
             }
+            status if !status.is_success() => return Err(ErpError::Profile),
+            _ => {}
         }
-
-        // 5. Step 2: Fetch Student Dashboard Details
-        let dashboard_url = format!("{}/stu_getStudentDashboardDetails.json", self.base_url);
-        let dash_res = client
-            .get(&dashboard_url)
-            .header("Accept", "application/json, text/javascript, */*; q=0.01")
+        let mut response = client
+            .get(format!(
+                "{}/stu_getStudentDashboardDetails.json",
+                self.base_url
+            ))
+            .header("Accept", "application/json")
             .header("X-Requested-With", "XMLHttpRequest")
-            .header("Referer", format!("{}/stu_studentDashboard.htm", self.base_url))
-            .header("User-Agent", "Mozilla/5.0")
+            .header(
+                "Referer",
+                format!("{}/stu_studentDashboard.htm", self.base_url),
+            )
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch student details from ERP: {}", e))?;
-
-        let body_text = dash_res
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read ERP response: {}", e))?;
-
-        if body_text.contains("<html") || body_text.trim().is_empty() {
-            warn!("ERP login rejected or session invalid: response contained HTML");
-            return Err("Invalid ERP credentials or session expired. Please verify your login info.".to_string());
+            .map_err(|_| ErpError::Unavailable)?;
+        match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(ErpError::Credentials),
+            status if status.is_server_error() => return Err(ErpError::Unavailable),
+            status if status.is_redirection() => return Err(ErpError::Credentials),
+            status if !status.is_success() => return Err(ErpError::Profile),
+            _ => {}
         }
-
-        let parsed: DashboardResponse = serde_json::from_str(&body_text).map_err(|e| {
-            error!("Failed to parse ERP dashboard response: {} | raw: {}", e, body_text);
-            "Unable to parse student profile returned by ERP".to_string()
-        })?;
-
-        if let Some(details) = parsed.profile_details {
-            let roll_no = details.roll_no.unwrap_or_default().trim().to_uppercase();
-            let full_name = details.first_name.unwrap_or_else(|| "Student".to_string()).trim().to_string();
-            let course_name = details.course_name.unwrap_or_else(|| "Engineering".to_string()).trim().to_string();
-
-            if roll_no.is_empty() {
-                return Err("ERP authentication succeeded but student roll number was missing.".to_string());
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| ErpError::Unavailable)? {
+            if body.len() + chunk.len() > 256 * 1024 {
+                return Err(ErpError::Profile);
             }
-
-            info!("Successfully authenticated student via ERP: {} ({}) - {}", full_name, roll_no, course_name);
-
-            Ok(ErpStudentProfile {
-                roll_no,
-                full_name,
-                course_name,
-                mobile_no: details.mobile_no,
-            })
-        } else {
-            Err("Invalid ERP credentials. No student profile was found.".to_string())
+            body.extend_from_slice(&chunk);
         }
+        if body.starts_with(b"<") {
+            return Err(ErpError::Credentials);
+        }
+        let dashboard: DashboardResponse =
+            serde_json::from_slice(&body).map_err(|_| ErpError::Profile)?;
+        let details = dashboard.profile_details.ok_or(ErpError::Credentials)?;
+        let profile = ErpStudentProfile {
+            roll_no: details.roll_no.unwrap_or_default().trim().to_uppercase(),
+            full_name: details.first_name.unwrap_or_default().trim().to_string(),
+            course_name: details.course_name.unwrap_or_default().trim().to_string(),
+        };
+        if profile.roll_no.is_empty()
+            || profile.roll_no.len() > 100
+            || !profile
+                .roll_no
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            || profile.full_name.is_empty()
+            || profile.full_name.len() > 200
+            || profile.course_name.is_empty()
+            || profile.course_name.len() > 200
+        {
+            return Err(ErpError::Profile);
+        }
+        Ok(profile)
     }
 }

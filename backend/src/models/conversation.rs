@@ -11,16 +11,6 @@ pub struct Conversation {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
-pub struct Message {
-    pub id: String,
-    pub conversation_id: String,
-    pub sender_id: String,
-    pub content: String,
-    pub is_read: i64, // 0 for false, 1 for true in sqlite
-    pub created_at: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct SendMessageDto {
     pub content: String,

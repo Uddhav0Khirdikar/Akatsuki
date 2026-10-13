@@ -5,7 +5,9 @@ use sqlx::FromRow;
 pub struct User {
     pub id: String,
     pub email: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
+    pub erp_verified: i64,
     pub name: String,
     pub roll_number: String,
     pub department: String,
@@ -20,11 +22,11 @@ pub struct User {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,          // user id
+    pub sub: String, // user id
     pub email: String,
     pub roll_number: String,
     pub name: String,
-    pub exp: usize,           // expiration timestamp
+    pub exp: usize, // expiration timestamp
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +63,7 @@ pub struct AuthResponse {
 #[derive(Debug, Serialize, FromRow, Clone)]
 pub struct UserDto {
     pub id: String,
+    pub erp_verified: bool,
     pub email: String,
     pub name: String,
     pub roll_number: String,
@@ -77,6 +80,7 @@ impl From<User> for UserDto {
     fn from(u: User) -> Self {
         UserDto {
             id: u.id,
+            erp_verified: u.erp_verified == 1,
             email: u.email,
             name: u.name,
             roll_number: u.roll_number,

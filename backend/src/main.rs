@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::{header, Method},
     routing::{get, patch, post, put},
     Json, Router,
 };
@@ -9,7 +11,7 @@ use bcrypt::{hash, DEFAULT_COST};
 use chrono::Utc;
 use serde_json::json;
 use tokio::sync::broadcast;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
@@ -35,44 +37,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to initialize tracing subscriber");
 
     // 2. Load configuration
-    let config = Config::init();
-    info!("Starting Akatsuki High-Performance Campus Backend on port {}", config.port);
+    let config = Config::init()?;
+    info!(
+        "Starting Akatsuki High-Performance Campus Backend on port {}",
+        config.port
+    );
 
     // 3. Initialize SQLite Database with WAL mode & high-concurrency connection pool
     let db = init_db(&config.database_url).await?;
 
     // 4. Seed initial campus data if empty
-    seed_initial_data_if_needed(&db).await?;
+    if config.seed_demo_data {
+        seed_initial_data_if_needed(&db).await?;
+    }
 
     // 5. Initialize Tokio broadcast channel for real-time WebSocket messaging
-    let (tx, _rx) = broadcast::channel::<String>(2048);
+    let (tx, _rx) = broadcast::channel::<handlers::ws::RealtimeEvent>(2048);
 
     let state = AppState {
         db,
         config: config.clone(),
         tx,
+        auth_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+        rate_limiter: Default::default(),
     };
 
+    let app = build_router(state);
+
+    // 8. Bind & serve
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    info!(
+        "🚀 Akatsuki Server running at http://localhost:{}",
+        config.port
+    );
+    info!(
+        "⚡ Real-Time WebSocket endpoint active at ws://localhost:{}/ws",
+        config.port
+    );
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+
+    Ok(())
+}
+
+fn build_router(state: AppState) -> Router {
     // 6. Build CORS Layer
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(state.config.allowed_origins.clone())
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     // 7. Define Routes
-    let app = Router::new()
+    Router::new()
         // Health check
-        .route("/api/health", get(|| async {
-            Json(json!({
-                "status": "healthy",
-                "service": "Akatsuki Campus Engine (Rust/Axum)",
-                "timestamp": Utc::now().to_rfc3339()
-            }))
-        }))
+        .route("/api/health", get(health))
         // Authentication routes
-        .route("/api/auth/register", post(handlers::auth::register))
-        .route("/api/auth/login", post(handlers::auth::login))
-        .route("/api/auth/erp-login", post(handlers::auth::erp_login))
+        .merge(Router::new()
+            .route("/api/auth/register", post(handlers::auth::register))
+            .route("/api/auth/login", post(handlers::auth::login))
+            .route("/api/auth/erp-login", post(handlers::auth::erp_login))
+            .route_layer(axum::middleware::from_fn_with_state(state.clone(), middleware::rate_limit::authentication_limit)))
         .route("/api/auth/me", get(handlers::auth::get_me))
         // Job Management routes
         .route("/api/jobs", post(handlers::jobs::create_job))
@@ -95,25 +131,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/conversations/:id/messages", post(handlers::conversations::send_message))
         // WebSocket Real-time stream
         .route("/ws", get(handlers::ws::ws_handler))
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(cors)
-        .with_state(state);
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+            // Deliberately exclude URI queries: WebSocket query tokens are secrets.
+            tracing::info_span!("request", method = %request.method(), path = request.uri().path())
+        }))
+        .with_state(state)
+}
 
-    // 8. Bind & serve
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!("🚀 Akatsuki Server running at http://localhost:{}", config.port);
-    info!("⚡ Real-Time WebSocket endpoint active at ws://localhost:{}/ws", config.port);
+async fn health(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, middleware::auth::AppError> {
+    sqlx::query("SELECT 1").execute(&state.db).await?;
+    Ok(Json(
+        json!({"status": "healthy", "service": "Akatsuki Campus Engine (Rust/Axum)", "timestamp": Utc::now().to_rfc3339()}),
+    ))
+}
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Unable to listen for Ctrl-C");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Unable to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
 }
 
 async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+        .await?;
 
     if user_count > 0 {
         return Ok(());
@@ -121,7 +178,17 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
 
     info!("Seeding realistic campus demo data (students, startup jobs, research gigs)...");
 
-    let password_hash = hash("college123", DEFAULT_COST).unwrap();
+    let password_hash = tokio::task::spawn_blocking(|| hash("college123", DEFAULT_COST))
+        .await
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *transaction)
+        .await?;
+    if count > 0 {
+        return Ok(());
+    }
     let now = Utc::now().to_rfc3339();
 
     // 1. Student 1: Lead Founder (Computer Science)
@@ -143,7 +210,7 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind("Rust, React, TypeScript, System Design")
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     // 2. Student 2: Research Scholar (Biotech / AI)
@@ -165,7 +232,7 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind("Python, BioInformatics, PyTorch")
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     // 3. Student 3: Design Lead / Job Seeker
@@ -187,7 +254,7 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind("Figma, TailwindCSS, Prototyping, Brand Design")
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     // Sample Jobs
@@ -212,7 +279,7 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind(&user1_id)
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     let job2_id = Uuid::new_v4().to_string();
@@ -236,7 +303,7 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind(&user2_id)
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     let job3_id = Uuid::new_v4().to_string();
@@ -260,9 +327,13 @@ async fn seed_initial_data_if_needed(pool: &DbPool) -> Result<(), sqlx::Error> {
     .bind(&user1_id)
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
     info!("Demo data seeded successfully! 3 students and 3 campus jobs initialized.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,3 +1,4 @@
+use crate::utils::validation::{self, Pagination};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -28,10 +29,28 @@ pub async fn create_job(
         ));
     }
 
+    validate_job_fields(
+        &payload.title,
+        &payload.description,
+        payload.category.as_deref().unwrap_or("CAMPUS_GIG"),
+        payload.location_type.as_deref().unwrap_or("ON_CAMPUS"),
+        "OPEN",
+        &payload.deadline,
+    )?;
+    validate_optional_fields(
+        &payload.location,
+        &payload.stipend,
+        &payload.skills_required,
+        &payload.department,
+    )?;
+
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let category = payload.category.unwrap_or_else(|| "CAMPUS_GIG".to_string());
-    let location_type = payload.location_type.unwrap_or_else(|| "ON_CAMPUS".to_string());
+    let location_type = payload
+        .location_type
+        .unwrap_or_else(|| "ON_CAMPUS".to_string());
     let status = "OPEN".to_string();
 
     sqlx::query(
@@ -57,32 +76,56 @@ pub async fn create_job(
     .bind(&auth.id)
     .bind(&now)
     .bind(&now)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     let created_job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&job_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok((StatusCode::CREATED, Json(created_job)))
 }
 
 pub async fn get_jobs(
     State(state): State<AppState>,
+    _auth: AuthUser,
     Query(filter): Query<JobFilterQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let limit = filter.limit.unwrap_or(20).clamp(1, 100);
     let offset = filter.offset.unwrap_or(0).max(0);
 
-    let search_pattern = filter.search.as_ref().map(|s| format!("%{}%", s.trim().to_lowercase()));
+    let search_pattern = filter
+        .search
+        .as_ref()
+        .map(|s| format!("%{}%", s.trim().to_lowercase()));
     let category_param = filter.category.as_ref().map(|s| s.trim().to_uppercase());
-    let location_param = filter.location_type.as_ref().map(|s| s.trim().to_uppercase());
-    let dept_param = filter.department.as_ref().map(|s| format!("%{}%", s.trim().to_lowercase()));
-    let status_param = filter.status.as_ref().map(|s| s.trim().to_uppercase()).unwrap_or_else(|| "OPEN".to_string());
+    let location_param = filter
+        .location_type
+        .as_ref()
+        .map(|s| s.trim().to_uppercase());
+    let dept_param = filter
+        .department
+        .as_ref()
+        .map(|s| format!("%{}%", s.trim().to_lowercase()));
+    let status_param = filter
+        .status
+        .as_ref()
+        .map(|s| s.trim().to_uppercase())
+        .unwrap_or_else(|| "OPEN".to_string());
 
+    validation::choice(&status_param, "status", validation::JOB_STATUSES)?;
+    if let Some(category) = &category_param {
+        validation::choice(category, "category", validation::CATEGORIES)?;
+    }
+    if let Some(location) = &location_param {
+        validation::choice(location, "location_type", validation::LOCATIONS)?;
+    }
+    validation::optional_text(&filter.search, "Search", 200)?;
+    validation::optional_text(&filter.department, "Department", 200)?;
     let jobs = sqlx::query_as::<_, JobWithPosterDto>(
         r#"
         SELECT 
@@ -99,7 +142,7 @@ pub async fn get_jobs(
           AND (? IS NULL OR j.category = ?)
           AND (? IS NULL OR j.location_type = ?)
           AND (? IS NULL OR LOWER(COALESCE(j.department, '')) LIKE ?)
-        ORDER BY j.created_at DESC
+        ORDER BY j.created_at DESC, j.id DESC
         LIMIT ? OFFSET ?
         "#,
     )
@@ -119,13 +162,14 @@ pub async fn get_jobs(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(jobs))
 }
 
 pub async fn get_job_by_id(
     State(state): State<AppState>,
+    _auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let job = sqlx::query_as::<_, JobWithPosterDto>(
@@ -145,7 +189,7 @@ pub async fn get_job_by_id(
     .bind(&id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(AppError::from)?
     .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     Ok(Json(job))
@@ -157,11 +201,12 @@ pub async fn update_job(
     Path(id): Path<String>,
     Json(payload): Json<UpdateJobDto>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id != auth.id {
@@ -175,12 +220,21 @@ pub async fn update_job(
     let description = payload.description.unwrap_or(job.description);
     let category = payload.category.unwrap_or(job.category);
     let location_type = payload.location_type.unwrap_or(job.location_type);
-    let location = payload.location.or(job.location);
-    let stipend = payload.stipend.or(job.stipend);
-    let skills_required = payload.skills_required.or(job.skills_required);
-    let department = payload.department.or(job.department);
+    let location = payload.location.unwrap_or(job.location);
+    let stipend = payload.stipend.unwrap_or(job.stipend);
+    let skills_required = payload.skills_required.unwrap_or(job.skills_required);
+    let department = payload.department.unwrap_or(job.department);
     let status = payload.status.unwrap_or(job.status);
-    let deadline = payload.deadline.or(job.deadline);
+    let deadline = payload.deadline.unwrap_or(job.deadline);
+    validate_job_fields(
+        &title,
+        &description,
+        &category,
+        &location_type,
+        &status,
+        &deadline,
+    )?;
+    validate_optional_fields(&location, &stipend, &skills_required, &department)?;
     let now = Utc::now().to_rfc3339();
 
     sqlx::query(
@@ -192,8 +246,8 @@ pub async fn update_job(
         WHERE id = ?
         "#,
     )
-    .bind(&title)
-    .bind(&description)
+    .bind(title.trim())
+    .bind(description.trim())
     .bind(&category)
     .bind(&location_type)
     .bind(&location)
@@ -204,16 +258,17 @@ pub async fn update_job(
     .bind(&deadline)
     .bind(&now)
     .bind(&id)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     let updated = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok(Json(updated))
 }
 
@@ -223,11 +278,12 @@ pub async fn update_job_status(
     Path(id): Path<String>,
     Json(payload): Json<UpdateJobStatusDto>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id != auth.id {
@@ -237,35 +293,27 @@ pub async fn update_job_status(
         ));
     }
 
-    let new_status = match payload.status.as_deref() {
-        Some("OPEN") => "OPEN".to_string(),
-        Some("CLOSED") => "CLOSED".to_string(),
-        _ => {
-            if job.status == "OPEN" {
-                "CLOSED".to_string()
-            } else {
-                "OPEN".to_string()
-            }
-        }
-    };
-
+    if let Some(status) = &payload.status {
+        validation::choice(status, "status", validation::JOB_STATUSES)?;
+    }
     let now = Utc::now().to_rfc3339();
-    sqlx::query("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?")
-        .bind(&new_status)
+    sqlx::query("UPDATE jobs SET status = COALESCE(?, CASE status WHEN 'OPEN' THEN 'CLOSED' ELSE 'OPEN' END), updated_at = ? WHERE id = ?")
+        .bind(&payload.status)
         .bind(&now)
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
     let updated = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok(Json(json!({
-        "message": format!("Job status changed to {}", new_status),
+        "message": format!("Job status changed to {}", updated.status),
         "job": updated
     })))
 }
@@ -275,11 +323,12 @@ pub async fn delete_job(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id != auth.id {
@@ -291,17 +340,22 @@ pub async fn delete_job(
 
     sqlx::query("DELETE FROM jobs WHERE id = ?")
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
-    Ok(Json(json!({ "message": "Job deleted successfully", "id": id })))
+    transaction.commit().await?;
+    Ok(Json(
+        json!({ "message": "Job deleted successfully", "id": id }),
+    ))
 }
 
 pub async fn get_my_posted_jobs(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
     let jobs = sqlx::query_as::<_, JobWithPosterDto>(
         r#"
         SELECT 
@@ -314,13 +368,43 @@ pub async fn get_my_posted_jobs(
         FROM jobs j
         JOIN users u ON j.creator_id = u.id
         WHERE j.creator_id = ?
-        ORDER BY j.created_at DESC
+        ORDER BY j.created_at DESC, j.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&auth.id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(jobs))
+}
+
+fn validate_job_fields(
+    title: &str,
+    description: &str,
+    category: &str,
+    location: &str,
+    status: &str,
+    deadline: &Option<String>,
+) -> Result<(), AppError> {
+    validation::text(title, "Title", 200)?;
+    validation::text(description, "Description", 20_000)?;
+    validation::choice(category, "category", validation::CATEGORIES)?;
+    validation::choice(location, "location_type", validation::LOCATIONS)?;
+    validation::choice(status, "status", validation::JOB_STATUSES)?;
+    validation::deadline(deadline)
+}
+fn validate_optional_fields(
+    location: &Option<String>,
+    stipend: &Option<String>,
+    skills: &Option<String>,
+    department: &Option<String>,
+) -> Result<(), AppError> {
+    validation::optional_text(location, "Location", 500)?;
+    validation::optional_text(stipend, "Stipend", 500)?;
+    validation::optional_text(skills, "Skills", 2000)?;
+    validation::optional_text(department, "Department", 200)
 }

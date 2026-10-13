@@ -26,6 +26,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http 0.5.2",
  "tracing",
