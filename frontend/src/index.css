@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/* ============================================================
+   AKATSUKI THEME & CUSTOM STYLING SYSTEM
+   Intra-College Opportunity Marketplace - 3D Dark Crimson Aesthetics
+   ============================================================ */
+
+:root {
+  --color-akatsuki-crimson: #e50914;
+  --color-akatsuki-blood: #c40018;
+  --color-akatsuki-dark: #0a060c;
+  --color-akatsuki-void: #050306;
+  --color-akatsuki-card: rgba(18, 11, 20, 0.85);
+  --color-akatsuki-glow: rgba(229, 9, 20, 0.45);
+  --color-akatsuki-border: rgba(229, 9, 20, 0.22);
+}
+
+/* Base Body & Layout */
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #060307;
+  color: #f3f4f6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #08040a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3d0e15;
+  border-radius: 9999px;
+  border: 1px solid rgba(229, 9, 20, 0.2);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8b0000;
+}
+
+/* Akatsuki Cloud Pulse & Glow Animations */
+@keyframes akatsukiPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 10px rgba(229, 9, 20, 0.6)) drop-shadow(0 0 25px rgba(229, 9, 20, 0.3));
+    transform: scale(1);
+  }
+  50% {
+    filter: drop-shadow(0 0 18px rgba(255, 34, 51, 0.85)) drop-shadow(0 0 35px rgba(229, 9, 20, 0.5));
+    transform: scale(1.03);
+  }
+}
+
+.akatsuki-cloud-glow {
+  animation: akatsukiPulse 3.5s ease-in-out infinite;
+}
+
+/* 3D Transform Utilities */
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+
+.perspective-1000 {
+  perspective: 1000px;
+}
+
+/* Custom Glassmorphism */
+.glass-akatsuki {
+  background: rgba(16, 9, 18, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(229, 9, 20, 0.22);
+}
+
+.glass-akatsuki-glow {
+  box-shadow: 0 0 35px rgba(229, 9, 20, 0.18), inset 0 0 15px rgba(229, 9, 20, 0.05);
+}
+
+/* Subtle Shimmer for High-Priority Opportunities */
+@keyframes crimsonShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.crimson-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(229, 9, 20, 0) 0%,
+    rgba(229, 9, 20, 0.25) 50%,
+    rgba(229, 9, 20, 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: crimsonShimmer 4s infinite linear;
+}
