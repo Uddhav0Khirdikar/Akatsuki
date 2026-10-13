@@ -1,0 +1,14 @@
+import { chromium } from '@playwright/test';
+const browser = await chromium.launch({executablePath:'/home/max/.local/bin/chromium',headless:true,args:['--no-sandbox','--no-proxy-server','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
+const page = await browser.newPage({ viewport:{width:1440,height:1000}, deviceScaleFactor:1 });
+const errors=[];
+page.on('pageerror',error=>errors.push(error.message));
+await page.goto('http://127.0.0.1:5173',{waitUntil:'networkidle'});
+await page.waitForTimeout(2200);
+await page.screenshot({path:'../ui/login/crimson-hour/screenshots/desktop.png',fullPage:true});
+console.log(JSON.stringify({title:await page.title(),errors,overflow:await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),webgl:await page.locator('canvas').count()}));
+await page.setViewportSize({width:390,height:844});
+await page.waitForTimeout(600);
+await page.screenshot({path:'../ui/login/crimson-hour/screenshots/mobile.png',fullPage:true});
+console.log(JSON.stringify({mobileOverflow:await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)}));
+await browser.close();

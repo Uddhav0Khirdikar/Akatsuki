@@ -1,5 +1,6 @@
+use crate::utils::validation::{self, Pagination};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -33,11 +34,14 @@ pub async fn apply_to_job(
         ));
     }
 
+    validation::text(&payload.pitch_note, "Pitch note", 10_000)?;
+    validation::url(&payload.resume_url)?;
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&job_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id == auth.id {
@@ -50,18 +54,21 @@ pub async fn apply_to_job(
     if job.status != "OPEN" {
         return Err(AppError(
             StatusCode::BAD_REQUEST,
-            format!("This job posting is currently {} and is not accepting applications", job.status),
+            format!(
+                "This job posting is currently {} and is not accepting applications",
+                job.status
+            ),
         ));
     }
 
     let existing = sqlx::query_as::<_, Application>(
-        "SELECT * FROM applications WHERE job_id = ? AND applicant_id = ?"
+        "SELECT * FROM applications WHERE job_id = ? AND applicant_id = ?",
     )
     .bind(&job_id)
     .bind(&auth.id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     if existing.is_some() {
         return Err(AppError(
@@ -87,29 +94,32 @@ pub async fn apply_to_job(
     .bind(&payload.resume_url)
     .bind(&now)
     .bind(&now)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     let created = sqlx::query_as::<_, Application>("SELECT * FROM applications WHERE id = ?")
         .bind(&app_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 pub async fn get_job_applications(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
     Path(job_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&job_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Job posting not found".to_string()))?;
 
     if job.creator_id != auth.id {
@@ -130,13 +140,16 @@ pub async fn get_job_applications(
         FROM applications a
         JOIN users u ON a.applicant_id = u.id
         WHERE a.job_id = ?
-        ORDER BY a.created_at DESC
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&job_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(applications))
 }
@@ -144,7 +157,9 @@ pub async fn get_job_applications(
 pub async fn get_my_applications(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(page): Query<Pagination>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (limit, offset) = page.bounds();
     let applications = sqlx::query_as::<_, StudentApplicationWithJobDto>(
         r#"
         SELECT 
@@ -154,13 +169,16 @@ pub async fn get_my_applications(
         FROM applications a
         JOIN jobs j ON a.job_id = j.id
         WHERE a.applicant_id = ?
-        ORDER BY a.created_at DESC
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&auth.id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(AppError::from)?;
 
     Ok(Json(applications))
 }
@@ -171,18 +189,19 @@ pub async fn update_application_status(
     Path(app_id): Path<String>,
     Json(payload): Json<UpdateApplicationStatusDto>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut transaction = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let app = sqlx::query_as::<_, Application>("SELECT * FROM applications WHERE id = ?")
         .bind(&app_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "Application not found".to_string()))?;
 
     let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = ?")
         .bind(&app.job_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
     if job.creator_id != auth.id {
         return Err(AppError(
@@ -196,7 +215,10 @@ pub async fn update_application_status(
     if !valid_statuses.contains(&new_status.as_str()) {
         return Err(AppError(
             StatusCode::BAD_REQUEST,
-            format!("Invalid status. Allowed values: {}", valid_statuses.join(", ")),
+            format!(
+                "Invalid status. Allowed values: {}",
+                valid_statuses.join(", ")
+            ),
         ));
     }
 
@@ -205,10 +227,11 @@ pub async fn update_application_status(
         .bind(&new_status)
         .bind(&now)
         .bind(&app_id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(AppError::from)?;
 
+    transaction.commit().await?;
     Ok(Json(json!({
         "message": "Application status updated successfully",
         "id": app_id,

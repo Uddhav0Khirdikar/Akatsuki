@@ -6,13 +6,13 @@ pub struct Job {
     pub id: String,
     pub title: String,
     pub description: String,
-    pub category: String,       // INTERNSHIP, PART_TIME, RESEARCH_ASSISTANT, PROJECT_COLLAB, CAMPUS_GIG, TUTORING
-    pub location_type: String,  // ON_CAMPUS, REMOTE, HYBRID
+    pub category: String, // INTERNSHIP, PART_TIME, RESEARCH_ASSISTANT, PROJECT_COLLAB, CAMPUS_GIG, TUTORING
+    pub location_type: String, // ON_CAMPUS, REMOTE, HYBRID
     pub location: Option<String>,
     pub stipend: Option<String>,
     pub skills_required: Option<String>,
     pub department: Option<String>,
-    pub status: String,         // OPEN, CLOSED
+    pub status: String, // OPEN, CLOSED
     pub deadline: Option<String>,
     pub creator_id: String,
     pub created_at: String,
@@ -38,12 +38,17 @@ pub struct UpdateJobDto {
     pub description: Option<String>,
     pub category: Option<String>,
     pub location_type: Option<String>,
-    pub location: Option<String>,
-    pub stipend: Option<String>,
-    pub skills_required: Option<String>,
-    pub department: Option<String>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    pub location: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    pub stipend: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    pub skills_required: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    pub department: Option<Option<String>>,
     pub status: Option<String>,
-    pub deadline: Option<String>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    pub deadline: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,4 +86,11 @@ pub struct JobWithPosterDto {
     pub creator_roll_number: String,
     pub applications_count: i64,
     pub created_at: String,
+}
+
+// Distinguish omitted fields (preserve) from explicit null (clear).
+fn nullable_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }

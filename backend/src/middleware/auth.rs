@@ -1,3 +1,7 @@
+use crate::{
+    handlers::auth::AppState,
+    models::user::{Claims, User},
+};
 use axum::{
     async_trait,
     extract::FromRequestParts,
@@ -5,14 +9,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde_json::json;
-
-use crate::{config::Config, models::user::Claims};
 
 pub struct AuthUser {
     pub id: String,
-    pub email: String,
     pub roll_number: String,
     pub name: String,
 }
@@ -21,54 +22,86 @@ pub struct AppError(pub StatusCode, pub String);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = Json(json!({
-            "error": self.1
-        }));
-        (self.0, body).into_response()
+        if self.0 == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(status = %self.0, error = %self.1, "Request failed");
+            return (self.0, Json(json!({"error": "Internal server error"}))).into_response();
+        }
+        (self.0, Json(json!({"error": self.1}))).into_response()
     }
 }
 
-#[async_trait]
-impl<S> FromRequestParts<S> for AuthUser
-where
-    S: Send + Sync,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok());
-
-        let token = match auth_header {
-            Some(header) if header.starts_with("Bearer ") => &header[7..],
-            _ => {
-                return Err(AppError(
-                    StatusCode::UNAUTHORIZED,
-                    "Missing or malformed Authorization header with Bearer token".to_string(),
-                ));
+impl From<sqlx::Error> for AppError {
+    fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(db) = &error {
+            if db.is_unique_violation() {
+                return Self(StatusCode::CONFLICT, "Record already exists".into());
             }
-        };
+            if db.message() == "job_closed" {
+                return Self(
+                    StatusCode::BAD_REQUEST,
+                    "This job is closed and is not accepting new applications or inquiries".into(),
+                );
+            }
+        }
+        Self(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    }
+}
 
-        let config = Config::init();
-        let token_data = decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
-            &Validation::default(),
+pub async fn authenticate(state: &AppState, token: &str) -> Result<(AuthUser, usize), AppError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    let claims = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| {
+        AppError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired session".into(),
         )
-        .map_err(|e| {
+    })?
+    .claims;
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+        .bind(claims.sub)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
             AppError(
                 StatusCode::UNAUTHORIZED,
-                format!("Invalid or expired JWT token: {}", e),
+                "Invalid or expired session".into(),
             )
         })?;
+    if !state.config.allow_local_auth && user.erp_verified != 1 {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "ERP verification is required".into(),
+        ));
+    }
+    Ok((
+        AuthUser {
+            id: user.id,
+            roll_number: user.roll_number,
+            name: user.name,
+        },
+        claims.exp,
+    ))
+}
 
-        Ok(AuthUser {
-            id: token_data.claims.sub,
-            email: token_data.claims.email,
-            roll_number: token_data.claims.roll_number,
-            name: token_data.claims.name,
-        })
+#[async_trait]
+impl FromRequestParts<AppState> for AuthUser {
+    type Rejection = AppError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError(StatusCode::UNAUTHORIZED, "Bearer token is required".into()))?;
+        Ok(authenticate(state, token).await?.0)
     }
 }
